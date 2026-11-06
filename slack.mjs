@@ -129,14 +129,28 @@ export async function slackPost(text, channel = null) {
   return ch;
 }
 
+/**
+ * Slack silently truncates `chat.postMessage` text at 4000 characters.
+ * Anything longer arrives cut off, which corrupts JSON and breaks the
+ * client's reassembly. So every posted chunk - prefix included - must stay
+ * at or below this limit.
+ */
+const SLACK_MAX_TEXT = 4000;
+/** Room for the "MBP-OUT2 <id> <i>/<n> " prefix inside the limit. */
+const SLACK_CHUNK = 3850;
+
 /** Post an answer, chunked if it is too big for one Slack message. */
 export async function slackPostAnswer(obj) {
   const json = JSON.stringify(obj);
-  if (json.length <= 30000) return await slackPost(OUT_PREFIX + json);
+  if (json.length <= SLACK_CHUNK) return await slackPost(OUT_PREFIX + json);
   const parts = [];
-  for (let i = 0; i < json.length; i += 30000) parts.push(json.slice(i, i + 30000));
+  for (let i = 0; i < json.length; i += SLACK_CHUNK) parts.push(json.slice(i, i + SLACK_CHUNK));
+  // The id rides along in every part so the receiver can keep the parts of
+  // different answers apart and only assemble a complete one.
+  const id = String(obj?.id ?? "?");
   for (let i = 0; i < parts.length; i++) {
-    await slackPost(`${OUT_PART_PREFIX}${i + 1}/${parts.length} ${parts[i]}`);
+    const head = `${OUT_PART_PREFIX}${id} ${i + 1}/${parts.length} `;
+    await slackPost(head + parts[i]);
   }
 }
 
@@ -246,14 +260,25 @@ export function parseAnswer(text, parts = new Map()) {
     }
   }
   if (text.startsWith(OUT_PART_PREFIX)) {
-    const m = text.slice(OUT_PART_PREFIX.length).match(/^(\d+)\/(\d+)\s+([\s\S]*)$/);
+    // "<id> <i>/<n> <payload>"
+    const m = text.slice(OUT_PART_PREFIX.length).match(/^(\S+)\s+(\d+)\/(\d+)\s+([\s\S]*)$/);
     if (!m) return null;
-    parts.set(m[1], m[3]);
-    if (parts.size < Number(m[2])) return null;
+    const [, id, idx, total, payload] = m;
+    // Parts are grouped per answer id, so a stale part from an earlier
+    // answer can never be spliced into this one.
+    let bucket = parts.get(id);
+    if (!bucket) {
+      bucket = new Map();
+      parts.set(id, bucket);
+    }
+    bucket.set(idx, payload);
+    if (bucket.size < Number(total)) return null;
     let joined = "";
-    for (let i = 1; i <= Number(m[2]); i++) joined += parts.get(String(i)) || "";
+    for (let i = 1; i <= Number(total); i++) joined += bucket.get(String(i)) || "";
     try {
-      return JSON.parse(joined);
+      const parsed = JSON.parse(joined);
+      parts.delete(id);
+      return parsed;
     } catch {
       return null;
     }
