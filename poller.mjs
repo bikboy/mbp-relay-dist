@@ -232,6 +232,8 @@ async function ntfyPost(headers, body, signal) {
 		// backoff and then giving up is strictly better than stalling.
 		if (res.status === 429 && attempt < 3) {
 			const raw = Number(res.headers.get("retry-after") ?? 5);
+			// Skip ntfy completely until the budget refills (cap: 60 min).
+			ntfyCooldownUntil = Date.now() + Math.min(Math.max(raw, 1), 3600) * 1000;
 			const wait = Math.min(Math.max(raw, 1), 30) * 1000 + 250;
 			res.body?.cancel().catch(() => {});
 			console.error(new Date().toISOString(), `ntfy: 429 (retry-after ${raw}s), retry in ${wait}ms`);
@@ -453,6 +455,17 @@ let lastNtfy = 0;
  */
 const NTFY_MIN_GAP_MS = 3000;
 
+/**
+ * Circuit breaker for the ntfy fast channel.
+ *
+ * When ntfy.sh answers 429 the topic's daily budget is exhausted (250
+ * messages / 24 h for anonymous visitors). Every further publish would burn
+ * another 30 s backoff for nothing, because GitHub already carries the
+ * answer. So remember until when ntfy is hopeless and skip the channel
+ * entirely until then - one failed publish, then zero overhead.
+ */
+let ntfyCooldownUntil = 0;
+
 
 /**
  * Publish one answer over ntfy (best effort - the mailbox is the fallback).
@@ -465,6 +478,13 @@ const NTFY_MIN_GAP_MS = 3000;
 async function ntfyPublishAnswer(answer) {
   const cfg = ntfyConfig();
   if (!cfg) return;
+
+  // Circuit breaker: ntfy is rate-limited, GitHub carries the answer anyway.
+  if (Date.now() < ntfyCooldownUntil) {
+    const mins = Math.ceil((ntfyCooldownUntil - Date.now()) / 60000);
+    console.error(new Date().toISOString(), `ntfy: skipped (rate limited, ~${mins} min left)`);
+    return;
+  }
 
   // ntfy.sh allows only 250 messages per 24h for an anonymous topic
   // (ratelimit-policy: "messages";q=250;w=86400). Chunked answers cost one
