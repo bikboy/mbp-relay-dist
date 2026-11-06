@@ -74,11 +74,35 @@ export async function slackBotUserId() {
   return j.user_id;
 }
 
-/** Resolve a channel name (#name) to its ID (C...). */
+/**
+ * Resolve the relay target to a channel ID.
+ *
+ *   "#mbp-relay"  -> the private/public channel with that name
+ *   "C0123..."     -> used as-is
+ *   "U0123..."     -> the direct message with that user (no channel setup,
+ *                     no invite needed - the bot may open the DM itself)
+ */
 export async function slackChannelId(name = null) {
   const cfg = slackConfig();
-  const want = name || cfg.SLACK_CHANNEL;
-  if (want && want.startsWith("C")) return want;
+  const want = name || cfg?.SLACK_CHANNEL;
+  if (!want) throw new Error("slack: no channel configured");
+  if (want.startsWith("C")) return want;
+  if (want.startsWith("U")) {
+    // Direct message: find the IM channel with that user.
+    let cursor = "";
+    for (;;) {
+      const j = await slackApi("conversations.list", {
+        types: "im",
+        limit: 200,
+        cursor: cursor || undefined,
+      });
+      const im = (j.channels || []).find((c) => c.user === want || c.id === want);
+      if (im) return im.id;
+      cursor = j.response_metadata?.next_cursor;
+      if (!cursor) break;
+    }
+    return want; // chat.postMessage resolves a user id to the DM itself
+  }
   let cursor = "";
   for (;;) {
     const j = await slackApi("conversations.list", {
