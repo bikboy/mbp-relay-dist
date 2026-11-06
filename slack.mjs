@@ -59,6 +59,9 @@ export async function slackApi(method, params = {}, token = null) {
     headers: {
       Authorization: `Bearer ${tok}`,
       "Content-Type": "application/json; charset=utf-8",
+      // Ask for identity encoding: some intermediaries return a Brotli body
+      // without the content-encoding header, which makes res.json() fail.
+      "accept-encoding": "identity",
     },
     body: JSON.stringify(params),
     signal: AbortSignal.timeout(20000),
