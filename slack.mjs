@@ -151,7 +151,10 @@ export async function slackHistory(channel = null, oldest = null) {
     oldest: oldest || undefined,
   });
   return (j.messages || [])
-    .filter((m) => m && !m.bot_id && m.type === "message" && typeof m.text === "string")
+    // No bot_id filter: the relay uses a single bot for both directions, so
+    // every message is bot-authored. Each side discriminates by text prefix
+    // (client parses OUT, remote parses CMD), ignoring its own posts.
+    .filter((m) => m && m.type === "message" && typeof m.text === "string")
     .map((m) => ({ ts: m.ts, text: m.text }));
 }
 
@@ -165,7 +168,6 @@ export async function slackHistory(channel = null, oldest = null) {
 export function socketMode({ onMessage, onStatus }) {
   let ws = null;
   let closed = false;
-  let botId = null;
 
   async function connect() {
     while (!closed) {
@@ -174,7 +176,7 @@ export function socketMode({ onMessage, onStatus }) {
         if (!cfg?.SLACK_APP_TOKEN) throw new Error("slack: no app-level token (SLACK_APP_TOKEN)");
         const open = await slackApi("apps.connections.open", {}, cfg.SLACK_APP_TOKEN);
         if (!open.url) throw new Error("slack: apps.connections.open returned no url");
-        botId = botId || (await slackBotUserId().catch(() => null));
+        await slackBotUserId().catch(() => null); // sanity: token validity
         const sock = new WebSocket(open.url);
         ws = sock;
         sock.onopen = () => onStatus?.("socket open");
@@ -196,7 +198,8 @@ export function socketMode({ onMessage, onStatus }) {
           } else if (msg.type === "events_api") {
             const e = msg.payload?.event;
             if (!e || e.type !== "message") return;
-            if (e.bot_id || (botId && e.user === botId)) return; // our own echo
+            // Direction is encoded in the text prefix (CMD vs OUT); each
+            // side only parses what it consumes, so its own posts are ignored.
             if (typeof e.text !== "string") return;
             await onMessage({ ts: e.ts, text: e.text, channel: e.channel });
           }
