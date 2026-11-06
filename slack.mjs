@@ -51,8 +51,8 @@ export function slackConfig() {
 
 /** POST a Slack Web API method. Throws on `ok: false`. */
 export async function slackApi(method, params = {}, token = null) {
-  const cfg = token ? { botToken: token } : slackConfig();
-  const tok = token || cfg?.botToken;
+  const cfg = token ? { SLACK_BOT_TOKEN: token } : slackConfig();
+  const tok = token || cfg?.SLACK_BOT_TOKEN;
   if (!tok) throw new Error("slack: no bot token");
   const res = await fetch(`${API}/${method}`, {
     method: "POST",
