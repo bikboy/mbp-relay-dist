@@ -312,6 +312,7 @@ async function run(cmd, opts = {}) {
 // ---------------------------------------------------------------------------
 
 const SLACK_POLL_MS = Number(process.env.RELAY_SLACK_POLL || 2000);
+const SLACK_FAST_POLL_MS = Number(process.env.RELAY_SLACK_FAST_POLL || 100);
 
 /** Which transport to use: "slack", "github" or "auto". */
 function transport() {
@@ -340,23 +341,18 @@ async function runViaSlack(cmd, opts = {}) {
     }
   };
 
-  // Fast path: Socket Mode event (only if an app-level token is configured).
-  let sock = null;
-  if (cfg.SLACK_APP_TOKEN) {
-    sock = socketMode({
-      onMessage: ({ text }) => {
-        const a = parseAnswer(text);
-        if (a) finish(a);
-      },
-      onStatus: (s) => process.stderr.write(`[slack] ${s}\n`),
-    });
-  }
-
-  // Recovery path: the channel history (an event may have been delivered to
-  // the *other* Socket Mode connection of the app).
+  // NOTE: deliberately NO client-side Socket Mode connection. With a single
+  // shared bot, opening one here races the MacBook's persistent socket: Slack
+  // picks one connection at random to deliver the command, so the MacBook can
+  // miss it by up to its own poll interval. Keeping the client socket-free
+  // makes the MacBook's the only connection => the command always reaches it,
+  // and the adaptive history poll below catches the answer in ~100-300 ms.
   const parts = new Map();
   const seenTs = new Set();
   const deadline = Date.now() + (opts.wait || 180000);
+  // Adaptive poll: most commands answer in well under a second, so poll fast
+  // right after the command goes out, then back off for long-running ones.
+  // This keeps the no-socket-event fallback snappy without hammering the API.
   try {
     while (!done && Date.now() < deadline) {
       for (const m of await slackHistory(channel)) {
@@ -366,10 +362,16 @@ async function runViaSlack(cmd, opts = {}) {
         if (a) finish(a);
       }
       if (done) break;
-      await sleep(Math.min(SLACK_POLL_MS, Math.max(200, deadline - Date.now())));
+      const elapsed = Date.now() - t0;
+      // 100 ms for the first 1.5 s, ramp to SLACK_POLL_MS by ~8 s.
+      const fast = SLACK_FAST_POLL_MS;
+      const interval = elapsed < 1500
+        ? fast
+        : Math.min(SLACK_POLL_MS, fast + (elapsed - 1500) * (SLACK_POLL_MS - fast) / 6500);
+      await sleep(Math.min(interval, Math.max(50, deadline - Date.now())));
     }
   } finally {
-    sock?.close();
+    // no client-side socket to close (kept socket-free on purpose)
   }
   if (!answer) throw new Error("timeout waiting for the MacBook (slack)");
   answer.ms = (answer.ms ?? 0) + (Date.now() - t0 - (answer.ms ?? 0));
