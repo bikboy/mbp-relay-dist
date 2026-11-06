@@ -1,11 +1,11 @@
 {
   "_metadata": {
-    "major_version": 1
+    "major_version": 2,
+    "minor_version": 1
   },
   "display_information": {
     "name": "MBP Relay",
-    "description": "Outbound-only command relay to the Allianz MacBook",
-    "background_color": "#232323"
+    "description": "Outbound-only command relay to the Allianz MacBook"
   },
   "features": {
     "bot_user": {
@@ -34,9 +34,9 @@
         "message.im"
       ]
     },
-    "org_deploy_enabled": false,
     "socket_mode_enabled": true,
-    "is_hosted": false,
-    "token_rotation_enabled": false
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false,
+    "is_hosted": false
   }
 }
