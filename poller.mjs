@@ -11,6 +11,7 @@
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { slackConfig, slackChannelId, slackHistory, slackPostAnswer, socketMode, parseCommand } from "./slack.mjs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -18,7 +19,14 @@ import path from "node:path";
 const REPO = process.env.RELAY_REPO || "bikboy/mbp-relay";
 const ISSUE = process.env.RELAY_ISSUE || "1";
 const HOSTNAME = process.env.RELAY_HOST || "github.com";
-const INTERVAL = Number(process.env.RELAY_INTERVAL || 3) * 1000;
+// GitHub poll interval. When Slack is the active transport the GitHub
+// mailbox is only the fallback, so it can be polled much more slowly - that
+// keeps the GitHub API budget (5000 calls/h) mostly free.
+const SLACK_ACTIVE = !!slackConfig();
+const INTERVAL = Number(
+  process.env[SLACK_ACTIVE ? "RELAY_INTERVAL_GITHUB" : "RELAY_INTERVAL"] ||
+    (SLACK_ACTIVE ? 15 : 3),
+) * 1000;
 const MAX_OUT = 40000;
 const STATE_DIR = path.join(os.homedir(), ".mbp-relay");
 const STATE_FILE = path.join(STATE_DIR, "state.json");
@@ -562,6 +570,86 @@ async function tick() {
 
 // Fast transport runs alongside the GitHub loop, which stays as fallback.
 ntfyLoop();
+
+// ---------------------------------------------------------------------------
+// Slack transport (fast path)
+//
+// Slack is the central relay: the MacBook only makes outbound calls (one
+// WebSocket for Socket Mode plus chat.postMessage for answers), so Zscaler
+// and the lack of inbound connectivity are not a problem.
+//
+// Socket Mode delivers message events in ~300 ms. Slack may hand a payload to
+// *any* open connection of the app, so the channel history is polled as well
+// and every command id is processed at most once.
+// ---------------------------------------------------------------------------
+const SLACK_SEEN = new Set();
+const SLACK_SEEN_MAX = 500;
+
+function markSeen(key) {
+  SLACK_SEEN.add(key);
+  if (SLACK_SEEN.size > SLACK_SEEN_MAX) {
+    // drop the oldest entries
+    for (const k of SLACK_SEEN) {
+      SLACK_SEEN.delete(k);
+      if (SLACK_SEEN.size <= SLACK_SEEN_MAX) break;
+    }
+  }
+}
+
+async function handleSlackCommand(req) {
+  if (!req || typeof req.cmd !== "string") return;
+  if (SLACK_SEEN.has(req.id)) return;
+  markSeen(req.id);
+  console.error(new Date().toISOString(), `slack: command ${req.id}: ${req.cmd.slice(0, 80)}`);
+  try {
+    const res = await handleRequest(req);
+    const answer = { id: req.id, host: os.hostname(), ...res };
+    await slackPostAnswer(answer);
+    console.error(new Date().toISOString(), `slack: answered ${req.id}`);
+  } catch (e) {
+    console.error(new Date().toISOString(), `slack: command ${req.id} failed: ${e.message}`);
+    try {
+      await slackPostAnswer({ id: req.id, host: os.hostname(), code: 1, error: e.message });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function slackListener() {
+  const cfg = slackConfig();
+  if (!cfg) {
+    console.error(new Date().toISOString(), "slack: not configured, staying on the GitHub transport");
+    return;
+  }
+  // Fast path: Socket Mode.
+  socketMode({
+    onMessage: ({ text }) => {
+      const req = parseCommand(text);
+      if (req) void handleSlackCommand(req);
+    },
+    onStatus: (s) => console.error(new Date().toISOString(), `slack: ${s}`),
+  });
+  // Recovery path: the channel history catches commands whose event went to
+  // the other connection of the app.
+  const parts = new Map();
+  const seenTs = new Set();
+  setInterval(async () => {
+    try {
+      const channel = await slackChannelId(cfg.SLACK_CHANNEL);
+      for (const m of await slackHistory(channel)) {
+        if (seenTs.has(m.ts)) continue;
+        seenTs.add(m.ts);
+        const req = parseCommand(m.text);
+        if (req) await handleSlackCommand(req);
+      }
+    } catch (e) {
+      console.error(new Date().toISOString(), `slack: history poll failed: ${e.message}`);
+    }
+  }, Number(process.env.RELAY_SLACK_POLL || 5000));
+}
+
+if (slackConfig()) slackListener();
 
 let warned = false;
 for (;;) {
