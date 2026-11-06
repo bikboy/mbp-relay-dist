@@ -232,8 +232,8 @@ async function ntfyPost(headers, body, signal) {
 		// backoff and then giving up is strictly better than stalling.
 		if (res.status === 429 && attempt < 3) {
 			const raw = Number(res.headers.get("retry-after") ?? 5);
-			// Skip ntfy completely until the budget refills (cap: 60 min).
-			ntfyCooldownUntil = Date.now() + Math.min(Math.max(raw, 1), 3600) * 1000;
+			// Skip ntfy completely until the budget refills (cap: 8 h).
+			ntfyCooldownUntil = Date.now() + Math.min(Math.max(raw, 1), 28800) * 1000;
 			const wait = Math.min(Math.max(raw, 1), 30) * 1000 + 250;
 			res.body?.cancel().catch(() => {});
 			console.error(new Date().toISOString(), `ntfy: 429 (retry-after ${raw}s), retry in ${wait}ms`);
