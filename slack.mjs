@@ -86,7 +86,7 @@ export async function slackChannelId(name = null) {
   const cfg = slackConfig();
   const want = name || cfg?.SLACK_CHANNEL;
   if (!want) throw new Error("slack: no channel configured");
-  if (want.startsWith("C")) return want;
+  if (want.startsWith("C") || want.startsWith("D") || want.startsWith("G")) return want;
   if (want.startsWith("U")) {
     // Direct message: find the IM channel with that user.
     let cursor = "";
