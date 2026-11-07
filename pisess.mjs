@@ -455,6 +455,35 @@ async function herdr(args) {
 	return res;
 }
 
+/**
+ * Workspace id -> display name, as shown on the herdr dial.
+ *
+ * `herdr workspace list` reports the label the user set for each workspace
+ * ("PR review", "custom sso role for secrets", ...). Those names are what the
+ * phone should show; the pi session's first message is only a fallback.
+ */
+async function herdrWorkspaceLabels() {
+	const map = new Map();
+	for (const cmd of [`${HOME}/.local/bin/herdr workspace list`, "herdr workspace list"]) {
+		const res = await runShell(`${cmd} 2>/dev/null`, 20000);
+		if (!res.ok || !res.text.trim()) continue;
+		try {
+			const json = JSON.parse(res.text);
+			const list = json?.result?.workspaces;
+			if (!Array.isArray(list)) continue;
+			for (const w of list) {
+				const id = String(w?.workspace_id ?? "");
+				const label = String(w?.label ?? "").trim();
+				if (id && label) map.set(id, label);
+			}
+			if (map.size) return map;
+		} catch {
+			/* try the next command */
+		}
+	}
+	return map;
+}
+
 async function herdrPanes() {
 	// The launch agent has a minimal PATH, so the known install location is
 	// tried first and the bare name second.
@@ -483,6 +512,9 @@ async function herdrPanes() {
 		}
 	}
 	if (!agents.length) return { available: false, panes: new Map() };
+	// Workspace id -> display name, so each pane can carry the name the user
+	// actually sees on the herdr dial.
+	const wsLabels = await herdrWorkspaceLabels();
 	const map = new Map();
 	for (const p of agents) {
 		const value = p?.agent_session?.value;
@@ -495,6 +527,11 @@ async function herdrPanes() {
 		map.set(id, {
 			paneId: String(p.pane_id ?? ""),
 			status: String(p.agent_status ?? ""),
+			// herdr names a workspace (that is what the user sees on the dial),
+			// so relay it: without it the phone has to guess the title from the
+			// first user message, which is not the same thing at all.
+			workspaceId: String(p.workspace_id ?? ""),
+			workspace: wsLabels.get(String(p.workspace_id ?? "")) ?? "",
 		});
 	}
 	return { available: true, panes: map };
@@ -548,7 +585,12 @@ async function handleLine(line) {
 			lines.unshift(herdr.available ? "#herdr 1" : "#herdr 0");
 			for (const s of sessions) {
 				const info = herdr.panes.get(s.id);
-				if (info) lines.push(`#pane ${s.id} ${info.paneId} ${info.status}`);
+				if (info) {
+					// #pane <session> <pane> <status> [workspace label]
+					// The label is last and may contain spaces, so it runs to EOL.
+					const ws = info.workspace ? ` ${info.workspace}` : "";
+					lines.push(`#pane ${s.id} ${info.paneId} ${info.status}${ws}`.trimEnd());
+				}
 			}
 			return { ok: true, text: lines.join("\n") || "(no sessions)", data: sessions };
 		}
